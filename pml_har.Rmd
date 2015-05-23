@@ -1,0 +1,121 @@
+---
+title: "Practical Machine Learning - Human Activity Recognition"
+author: "Tianzi Harrison"
+date: "Friday, May 22, 2015"
+output: html_document
+---
+
+The goal of this assignment is to choose a prediction model from the caret package in R so that it can correctly tell the manner people carry out weight-lifting exercises, given data collected by wearable devices. 
+
+The raw data come from the paper "Qualitative Activity Recognition of Weight Lifting Exercises" presented at SIGCHI 2013. The data include direct readings from sensors on four wearable devices, i.e. the three-axes acceleration, gyroscope, and magnetometer data from belt, glove, arm-band, and dumbell; they also include values calculated for the three Euler angles, i.e., the mean, variance, standard deviation, max, min, amplitude, kurtosis, and skewness for roll, pitch, and yaw. 
+```{r, warning=FALSE, message=FALSE}
+        require(gbm); require(rpart); require(plyr); require(randomForest)
+        require(lubridate); require(dplyr); require(caret); require(rattle)
+
+        fileURL1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        fileURL2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        if(!file.exists("pml-training.csv")){
+                download.file(fileURL1, destfile = "pml-training.csv", method = "curl")
+        }
+        if(!file.exists("pml-testing.csv")){
+                download.file(fileURL2, destfile = "pml-testing.csv", method = "curl")
+        }
+
+        t <- read.csv("pml-training.csv", header = T, na.strings = c("","NA", "#DIV/0!"))
+        f <- read.csv("pml-testing.csv", header = T, na.strings = c("", "NA", "#DIV/0!"))
+        
+        identical(t$skewness_roll_belt, t$skewness_roll_belt.1)
+```
+It is unclear why there are two skewness values for the Euler angle roll from the belt sensor. However, since they are not identical, removing either would be unwarranted.  
+
+#### Prepare the training set for cross validation
+Taking a brief look at the 1st through 6th column, as well as the last, reveals that none of these variables shall be considered as predictors for the outcome classe, which is in the last column. 
+```{r}
+        t[c(1,10,1000,5000,9000), c(1:6, 160)]
+```
+Furthermore, it is impossible to know at this stage how to impute missing values for any variable in the dataset. The best way to deal with missing values may be to exclude them when trying to train the data.
+```{r}
+        index <- which(colSums(is.na(t)) == 0)[-1:-5]
+        train <- t[, index]
+        test <- f[, index]
+# set numeric class for all variables in the train and test sets, except for classe
+        for (i in 1:(length(index)-1)){
+                train[, i] <- as.numeric(train[, i])
+                test[, i] <- as.numeric(test[, i])
+        }
+```
+Next, I built a 2-fold cross validation manually inside my training data by spliting the data 80/20. 
+```{r}
+        set.seed(111)
+        inTrain <- createDataPartition(y = train$classe, p = 0.8, list = FALSE)
+        trainInTrain <- train[inTrain,]
+        testInTrain <- train[-inTrain,]
+```
+#### Select models: rpart, gbm, rf
+The first model tried is **rpart**, it is fast to run and easy to interpret. I believe it goes through the data once only and creates one tree. 
+```{r}
+        set.seed(111)
+        rpartFit <- train(classe ~ ., method = "rpart", data = trainInTrain)
+        if(!file.exists("rpartFit.rds")){
+                rpartFit <- train(classe ~ ., method = "rpart", data = trainInTrain)
+                saveRDS(rpartFit, "rpartFit.rds")
+        } else{
+                rpartFit <- readRDS("rpartFit.rds")
+        }
+        fancyRpartPlot(rpartFit$finalModel)
+# apply the model to the test in training dataset
+        rpartPred <- predict(rpartFit, newdata = testInTrain)
+        confusionMatrix(rpartPred, testInTrain$classe)
+```
+When this model is applied to the testing data in the training set, the accuracy rate, unfortunately, is low, at only 57%. The model is abandoned. A more sophisticated model is needed for the problem.
+
+The second model to try is the **generalized boosting model** or **Stochastic Gradient Boosting**, which is an ensemble of regression and classification trees. All parameters are taken as their default values. 
+```{r}
+        set.seed(111)
+        if(!file.exists("gbmFit.rds")){
+                gbmFit <- train(classe ~ ., data = trainInTrain, method = "gbm", 
+                                verbose = F)
+                saveRDS(gbmFit, "gbmFit.rds")
+        }else{
+                gbmFit <- readRDS("gbmFit.rds")
+        }
+        gbmFit
+```
+gbmFit contains 54 predictors (with varying relative influence, some zero) with 25 bootstrapped samples of the same size as the train in train dataset. 54 is much greater than 17 in the published paper. However, there are exactly 18 with a relative influence of greater than 1, excluding num_window. The accuracy of the model improves to 98.4%.
+```{r}
+        summary(gbmFit)
+# apply model
+        gbmPred <- predict(gbmFit, newdata = testInTrain)
+        confusionMatrix(gbmPred, testInTrain$classe)
+```
+The accuracy rate of the gbm model is also 98.4% when applied to the validation dataset in the training set. The expected out-of-sample error rate is one minus that value, which is 1.6%.
+
+The third model to try is **random forest**. Technically, this model shall be applied to the entire training set instead of a subset of the training set because the out-of-bag error rate is a good estimate of the out-of-sample error rate. 
+```{r}
+        set.seed(111)
+        if(!file.exists("rfFit.rds")){
+                rfFit <- randomForest(classe ~ ., data = trainInTrain, prox = T)
+                saveRDS(rfFit, "rfFit.rds")
+        }else{
+                rfFit <- readRDS("rfFit.rds")
+        }
+        rfFit
+```
+As 500 trees are created, the out-of-bag estimate of error rate is 0.16%. I expect the out-of-sample error to be close to the out-of-bag error rate for the random forest model on the train in train dataset. 
+```{r}
+        rfPred <- predict(rfFit, newdata = testInTrain)
+        confusionMatrix(rfPred, testInTrain$classe)
+```
+The accuracy rate 99.8% is close to perfect, suggesting possible overfitting. However, as expected, the out-of-sample rate turns out to be one minus the out-of-sample accuracy, which is 0.2%.
+
+#### Predict on test
+
+Applying both models to the test set returns identical answers.
+
+```{r}
+        set.seed(111)
+        gbmAnswers <- predict(gbmFit, newdata = test)
+        rfAnswers <- predict(rfFit, newdata = test)
+        identical(as.character(gbmAnswers), as.character(rfAnswers))
+        gbmAnswers
+```
